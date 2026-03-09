@@ -1,57 +1,302 @@
+import time
+from typing import List, Tuple
+
 import streamlit as st
-import cv2
 import numpy as np
-from feature_extractor import extract_features
-from similarity import get_top_k
-from google_search import search_images, download_images
+from PIL import Image
 
-st.title("CBIR Image Retrieval System")
+from feature_extractor import (
+    load_feature_extractor,
+    load_classifier,
+    load_imagenet_labels,
+    extract_features,
+    classify_image,
+)
+from google_search import search_images_google, download_image
+from similarity import compute_similarity, get_top_k_similar
 
-# Step 1 : Upload query image
-uploaded = st.file_uploader("Upload Query Image", type=["jpg","png"])
 
-# Step 2 : Keyword input
-keyword = st.text_input("Search keyword")
+def inject_css():
+    st.markdown(
+        """
+        <style>
+          .main-header {
+            font-size: 2.5rem;
+            font-weight: bold;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-align: center;
+            margin-bottom: 2rem;
+          }
+          .pipeline-step {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            font-weight: bold;
+            display: inline-block;
+            margin-bottom: 1rem;
+          }
+          .similarity-score {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #667eea;
+          }
+          .stProgress > div > div > div > div {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-if uploaded and keyword:
 
-    # read query image
-    file_bytes = np.asarray(bytearray(uploaded.read()), dtype=np.uint8)
-    query_img = cv2.imdecode(file_bytes, 1)
+def show_feature_heatmap(features: np.ndarray):
+    """Optional visualization; requires matplotlib."""
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        st.caption("Install matplotlib to see feature heatmap: pip install matplotlib")
+        return
 
-    st.image(query_img, caption="Query Image")
+    st.subheader("🧠 Extracted Features")
+    grid = features[:256].reshape(16, 16) if features.size >= 256 else features.reshape(-1, 1)
 
-    # extract query feature
-    query_feature = extract_features(query_img)
+    fig, ax = plt.subplots(figsize=(6, 6))
+    im = ax.imshow(grid, cmap="viridis", aspect="auto")
+    ax.set_title(f"Feature Vector ({features.size} dimensions)")
+    plt.colorbar(im, ax=ax)
+    st.pyplot(fig)
+    plt.close(fig)
 
-    # Step 3 Google search
-    links = search_images(keyword)
 
-    # Step 4 download images
-    paths = download_images(links)
+def main():
+    st.set_page_config(page_title="Image Similarity Pipeline", page_icon="🔍", layout="wide")
+    inject_css()
 
-    features = []
-    valid_paths = []
+    st.markdown('<h1 class="main-header">🔍 Image Similarity Pipeline</h1>', unsafe_allow_html=True)
 
-    # Step 5 extract features
-    for p in paths:
+    # Sidebar configuration
+    st.sidebar.header("⚙️ Configuration")
+    top_k = st.sidebar.slider("Top K Results", min_value=1, max_value=20, value=5)
+    num_search_images = st.sidebar.slider("Number of Search Images", min_value=5, max_value=50, value=20)
 
-        img = cv2.imread(p)
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔑 Google API (Optional)")
+    api_key = st.sidebar.text_input("API Key", type="password", help="Google Custom Search API Key")
+    cx = st.sidebar.text_input("Search Engine ID", help="Custom Search Engine ID")
 
-        if img is None:
-            continue
+    if "results" not in st.session_state:
+        st.session_state.results = {}
 
-        f = extract_features(img)
+    # Step 1: Upload
+    st.markdown('<p class="pipeline-step">Step 1: Upload Image</p>', unsafe_allow_html=True)
 
-        features.append(f)
-        valid_paths.append(p)
+    uploaded_file = st.file_uploader(
+        "Choose an image...",
+        type=["jpg", "jpeg", "png", "webp"],
+        help="Upload an image to find similar images",
+    )
 
-    # Step 6 similarity
-    results = get_top_k(query_feature, features, valid_paths, k=5)
+    if uploaded_file is None:
+        st.info("👆 Please upload an image to start the similarity pipeline")
+        st.markdown("### 📋 Pipeline Steps:")
+        for s in [
+            "1️⃣ **Upload Image** - Select an image to analyze",
+            "2️⃣ **Feature Extraction** - Extract deep features using ResNet-50",
+            "3️⃣ **Image Classification** - Generate keywords from predictions",
+            "4️⃣ **Google Image Search** - Search for similar images online",
+            "5️⃣ **Download Images** - Fetch images from search results",
+            "6️⃣ **Feature Extraction** - Extract features from all downloaded images",
+            "7️⃣ **Similarity Comparison** - Compute cosine similarity scores",
+            "8️⃣ **Show Top K** - Display the most similar images",
+        ]:
+            st.markdown(s)
+        return
 
-    st.subheader("Top Similar Images")
+    query_image = Image.open(uploaded_file)
 
-    for score, path in results:
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.image(query_image, caption="Uploaded Image", use_container_width=True)
 
-        st.image(path)
-        st.write("Similarity:", round(score,3))
+    # Run Pipeline
+    if st.button("🚀 Run Pipeline", type="primary", use_container_width=True):
+        st.session_state.results = {}
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        # Step 2: Feature extraction
+        status_text.text("Step 2: Extracting features from uploaded image...")
+        progress_bar.progress(10)
+        feature_extractor = load_feature_extractor()
+
+        query_features = extract_features(query_image, feature_extractor)
+        st.session_state.results["query_features"] = query_features
+        progress_bar.progress(20)
+
+        # Step 3: Classification
+        status_text.text("Step 3: Classifying image to generate keywords...")
+        progress_bar.progress(30)
+        classifier = load_classifier()
+        labels = load_imagenet_labels()
+
+        classifications = classify_image(query_image, classifier, labels, top_k=5)
+        st.session_state.results["classifications"] = classifications
+        progress_bar.progress(40)
+
+        keywords = [cls[0] for cls in classifications[:3]]
+        search_query = " ".join(keywords)
+        st.session_state.results["search_query"] = search_query
+
+        # Step 4: Search
+        status_text.text(f"Step 4: Searching images for '{search_query}'...")
+        progress_bar.progress(50)
+        image_urls = search_images_google(
+            search_query,
+            num_images=num_search_images,
+            api_key=api_key or None,
+            cx=cx or None,
+        )
+        st.session_state.results["image_urls"] = image_urls
+        progress_bar.progress(60)
+
+        # Step 5: Download
+        status_text.text("Step 5: Downloading images...")
+        progress_bar.progress(65)
+
+        downloaded_images: List[Tuple[str, Image.Image]] = []
+        download_progress = st.progress(0.0)
+
+        for i, url in enumerate(image_urls):
+            img = download_image(url)
+            if img is not None:
+                downloaded_images.append((url, img))
+            download_progress.progress((i + 1) / max(1, len(image_urls)))
+
+        download_progress.empty()
+        st.session_state.results["downloaded_images"] = downloaded_images
+        progress_bar.progress(75)
+
+        # Step 6: Features for downloaded
+        status_text.text("Step 6: Extracting features from downloaded images...")
+        image_features: List[np.ndarray] = []
+        feature_progress = st.progress(0.0)
+
+        for i, (_, img) in enumerate(downloaded_images):
+            feats = extract_features(img, feature_extractor)
+            image_features.append(feats)
+            feature_progress.progress((i + 1) / max(1, len(downloaded_images)))
+
+        feature_progress.empty()
+        st.session_state.results["image_features"] = image_features
+        progress_bar.progress(85)
+
+        # Step 7: Similarity
+        status_text.text("Step 7: Computing similarity scores...")
+        progress_bar.progress(90)
+
+        similarities = compute_similarity(query_features, image_features)
+        st.session_state.results["similarities"] = similarities
+        progress_bar.progress(95)
+
+        # Step 8: Top K
+        status_text.text("Step 8: Ranking and selecting Top K images...")
+        top_k_results = get_top_k_similar(similarities, min(top_k, len(similarities)))
+        st.session_state.results["top_k_results"] = top_k_results
+
+        progress_bar.progress(100)
+        status_text.text("✅ Pipeline completed!")
+        time.sleep(0.6)
+        status_text.empty()
+        progress_bar.empty()
+
+    # Display Results
+    results = st.session_state.results
+
+    if "classifications" in results:
+        st.markdown("---")
+        st.markdown(
+            '<p class="pipeline-step">Step 2-3: Feature Extraction & Classification</p>',
+            unsafe_allow_html=True,
+        )
+
+        colA, colB = st.columns(2)
+        with colA:
+            show_feature_heatmap(results["query_features"])
+
+        with colB:
+            st.subheader("🏷️ Image Classification")
+            for label, prob in results["classifications"]:
+                st.write(f"**{label}**")
+                st.progress(prob)
+                st.caption(f"Confidence: {prob * 100:.2f}%")
+            st.info(f"🔍 Search Query: **{results['search_query']}**")
+
+    if "downloaded_images" in results:
+        st.markdown("---")
+        st.markdown(
+            '<p class="pipeline-step">Step 4-5: Image Search & Download</p>',
+            unsafe_allow_html=True,
+        )
+
+        downloaded_images = results["downloaded_images"]
+        st.write(f"Downloaded {len(downloaded_images)} images")
+
+        cols = st.columns(5)
+        for i, (_, img) in enumerate(downloaded_images[:20]):
+            with cols[i % 5]:
+                st.image(img, use_container_width=True, caption=f"Image {i + 1}")
+
+    if "top_k_results" in results:
+        st.markdown("---")
+        st.markdown(
+            '<p class="pipeline-step">Step 6-8: Similarity Comparison & Top K Results</p>',
+            unsafe_allow_html=True,
+        )
+
+        top_k_results = results["top_k_results"]
+        downloaded_images = results.get("downloaded_images", [])
+
+        st.subheader(f"🏆 Top {len(top_k_results)} Most Similar Images")
+
+        if not top_k_results:
+            st.warning("No similarity results to display (no images downloaded / no features).")
+            return
+
+        cols = st.columns(min(len(top_k_results), 5))
+        for i, (idx, sim) in enumerate(top_k_results):
+            with cols[i % 5]:
+                if idx < len(downloaded_images):
+                    _, img = downloaded_images[idx]
+                    st.image(img, use_container_width=True)
+                    st.markdown(
+                        f'<p class="similarity-score">🎯 {sim * 100:.1f}%</p>',
+                        unsafe_allow_html=True,
+                    )
+                    st.caption(f"Rank #{i + 1}")
+
+        # Optional detailed table; requires pandas
+        try:
+            import pandas as pd
+
+            st.markdown("---")
+            st.subheader("📊 Detailed Similarity Scores")
+
+            table = []
+            for rank, (idx, sim) in enumerate(top_k_results, 1):
+                table.append({
+                    "Rank": rank,
+                    "Image Index": idx + 1,
+                    "Similarity Score": f"{sim * 100:.2f}%",
+                    "Cosine Similarity": f"{sim:.4f}",
+                })
+            st.dataframe(pd.DataFrame(table), use_container_width=True)
+        except Exception:
+            st.caption("Install pandas to see the detailed table: pip install pandas")
+
+
+if __name__ == "__main__":
+    main()
