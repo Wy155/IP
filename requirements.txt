@@ -3,6 +3,8 @@ numpy
 pillow
 requests
 scikit-learn
+scikit-image
+scipy
 google-api-python-client
 matplotlib
 pandas
