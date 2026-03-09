@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 
 from feature_extractor import (
+    METHODS,
     load_feature_extractor,
     load_classifier,
     load_imagenet_labels,
@@ -14,6 +15,23 @@ from feature_extractor import (
 )
 from google_search import search_images_google, download_image
 from similarity import compute_similarity, get_top_k_similar
+
+
+# ─────────────────────────────────────────────────
+# Method descriptions shown in the sidebar
+# ─────────────────────────────────────────────────
+METHOD_INFO = {
+    "resnet":     ("🤖 Deep learning (ResNet-50 ImageNet)", "2 048-d", "High – requires PyTorch"),
+    "color_hist": ("🎨 RGB intensity distribution per channel", "192-d", "Very fast – no extra deps"),
+    "hsv_hist":   ("🌈 Hue/Saturation/Value distribution", "34-d",  "Very fast – no extra deps"),
+    "glcm":       ("🔲 Co-occurrence texture statistics", "48-d",   "Moderate – needs scikit-image"),
+    "hog":        ("📐 Edge & gradient orientation histograms", "~1 764-d", "Fast – needs scikit-image"),
+    "lbp":        ("🔵 Micro-texture local binary patterns", "26-d",  "Fast – needs scikit-image"),
+    "gabor":      ("〰️ Frequency/orientation filter responses", "48-d",  "Moderate – needs scikit-image + scipy"),
+    "combined":   ("🔗 Color Hist + HOG + ResNet (concatenated)", "varies", "Slow – needs all deps"),
+}
+
+NEEDS_RESNET = {"resnet", "combined"}
 
 
 def inject_css():
@@ -43,6 +61,14 @@ def inject_css():
             font-weight: bold;
             color: #667eea;
           }
+          .method-badge {
+            background: #f0f2ff;
+            border-left: 4px solid #667eea;
+            padding: 0.4rem 0.8rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+          }
           .stProgress > div > div > div > div {
             background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
           }
@@ -52,7 +78,7 @@ def inject_css():
     )
 
 
-def show_feature_heatmap(features: np.ndarray):
+def show_feature_heatmap(features: np.ndarray, title: str = "Extracted Features"):
     """Optional visualization; requires matplotlib."""
     try:
         import matplotlib.pyplot as plt
@@ -60,12 +86,16 @@ def show_feature_heatmap(features: np.ndarray):
         st.caption("Install matplotlib to see feature heatmap: pip install matplotlib")
         return
 
-    st.subheader("🧠 Extracted Features")
-    grid = features[:256].reshape(16, 16) if features.size >= 256 else features.reshape(-1, 1)
+    st.subheader("🧠 " + title)
+    size = features.size
+    side = int(np.ceil(np.sqrt(min(size, 256))))
+    padded = np.zeros(side * side, dtype=np.float32)
+    padded[:min(size, side * side)] = features[:min(size, side * side)]
+    grid = padded.reshape(side, side)
 
-    fig, ax = plt.subplots(figsize=(6, 6))
+    fig, ax = plt.subplots(figsize=(5, 5))
     im = ax.imshow(grid, cmap="viridis", aspect="auto")
-    ax.set_title(f"Feature Vector ({features.size} dimensions)")
+    ax.set_title(f"Feature Vector ({size:,} dims)")
     plt.colorbar(im, ax=ax)
     st.pyplot(fig)
     plt.close(fig)
@@ -77,8 +107,32 @@ def main():
 
     st.markdown('<h1 class="main-header">🔍 Hybrid CBIR</h1>', unsafe_allow_html=True)
 
-    # Sidebar configuration
+    # ── Sidebar ──────────────────────────────────────────────────────────────
     st.sidebar.header("⚙️ Configuration")
+
+    # Feature extraction method selector
+    st.sidebar.subheader("🧪 Feature Extraction Method")
+    method_label = st.sidebar.selectbox(
+        "Select method",
+        options=list(METHODS.keys()),
+        index=0,
+        help="Choose how image features are extracted for similarity comparison.",
+    )
+    method_key = METHODS[method_label]
+
+    # Show method info card
+    if method_key in METHOD_INFO:
+        desc, dims, cost = METHOD_INFO[method_key]
+        st.sidebar.markdown(
+            f"<div class='method-badge'>"
+            f"<b>{desc}</b><br>"
+            f"📏 Dimensions: {dims}<br>"
+            f"⚡ Cost: {cost}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.sidebar.markdown("---")
     top_k = st.sidebar.slider("Top K Results", min_value=1, max_value=20, value=5)
     num_search_images = st.sidebar.slider("Number of Search Images", min_value=5, max_value=50, value=20)
 
@@ -87,10 +141,11 @@ def main():
     api_key = st.sidebar.text_input("API Key", type="password", help="Google Custom Search API Key")
     cx = st.sidebar.text_input("Search Engine ID", help="Custom Search Engine ID")
 
+    # ── Session state ─────────────────────────────────────────────────────────
     if "results" not in st.session_state:
         st.session_state.results = {}
 
-    # Step 1: Upload
+    # ── Step 1: Upload ────────────────────────────────────────────────────────
     st.markdown('<p class="pipeline-step">Step 1: Upload Image</p>', unsafe_allow_html=True)
 
     uploaded_file = st.file_uploader(
@@ -103,14 +158,14 @@ def main():
         st.info("👆 Please upload an image to start the similarity pipeline")
         st.markdown("### 📋 Pipeline Steps:")
         for s in [
-            "1️⃣ **Upload Image** - Select an image to analyze",
-            "2️⃣ **Feature Extraction** - Extract deep features using ResNet-50",
-            "3️⃣ **Image Classification** - Generate keywords from predictions",
-            "4️⃣ **Google Image Search** - Search for similar images online",
-            "5️⃣ **Download Images** - Fetch images from search results",
-            "6️⃣ **Feature Extraction** - Extract features from all downloaded images",
-            "7️⃣ **Similarity Comparison** - Compute cosine similarity scores",
-            "8️⃣ **Show Top K** - Display the most similar images",
+            "1️⃣ **Upload Image** – Select an image to analyze",
+            "2️⃣ **Feature Extraction** – Extract features using your chosen method",
+            "3️⃣ **Image Classification** – Generate keywords from ResNet predictions",
+            "4️⃣ **Google Image Search** – Search for similar images online",
+            "5️⃣ **Download Images** – Fetch images from search results",
+            "6️⃣ **Feature Extraction** – Extract features from all downloaded images",
+            "7️⃣ **Similarity Comparison** – Compute cosine similarity scores",
+            "8️⃣ **Show Top K** – Display the most similar images",
         ]:
             st.markdown(s)
         return
@@ -121,27 +176,43 @@ def main():
     with col2:
         st.image(query_image, caption="Uploaded Image", use_container_width=True)
 
-    # Run Pipeline
+    st.info(f"🧪 Feature method: **{method_label}**", icon="ℹ️")
+
+    # ── Run Pipeline ──────────────────────────────────────────────────────────
     if st.button("🚀 Run Pipeline", type="primary", use_container_width=True):
         st.session_state.results = {}
 
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        # Step 2: Feature extraction
-        status_text.text("Step 2: Extracting features from uploaded image...")
-        progress_bar.progress(10)
-        feature_extractor = load_feature_extractor()
+        # Conditionally load ResNet
+        feature_extractor = None
+        classifier = None
+        labels = None
 
-        query_features = extract_features(query_image, feature_extractor)
-        st.session_state.results["query_features"] = query_features
-        progress_bar.progress(20)
+        needs_resnet = method_key in NEEDS_RESNET
 
-        # Step 3: Classification
-        status_text.text("Step 3: Classifying image to generate keywords...")
-        progress_bar.progress(30)
+        if needs_resnet:
+            status_text.text("Loading ResNet-50 model…")
+            feature_extractor = load_feature_extractor()
+
+        # Always load classifier for keyword generation (Step 3)
+        status_text.text("Loading classifier for keyword generation…")
         classifier = load_classifier()
         labels = load_imagenet_labels()
+
+        # Step 2: Feature extraction on query image
+        status_text.text(f"Step 2: Extracting features ({method_label})…")
+        progress_bar.progress(10)
+
+        query_features = extract_features(query_image, model=feature_extractor, method=method_key)
+        st.session_state.results["query_features"] = query_features
+        st.session_state.results["method_label"] = method_label
+        progress_bar.progress(20)
+
+        # Step 3: Classification for search keywords
+        status_text.text("Step 3: Classifying image to generate keywords…")
+        progress_bar.progress(30)
 
         classifications = classify_image(query_image, classifier, labels, top_k=5)
         st.session_state.results["classifications"] = classifications
@@ -152,7 +223,7 @@ def main():
         st.session_state.results["search_query"] = search_query
 
         # Step 4: Search
-        status_text.text(f"Step 4: Searching images for '{search_query}'...")
+        status_text.text(f"Step 4: Searching images for '{search_query}'…")
         progress_bar.progress(50)
         image_urls = search_images_google(
             search_query,
@@ -164,7 +235,7 @@ def main():
         progress_bar.progress(60)
 
         # Step 5: Download
-        status_text.text("Step 5: Downloading images...")
+        status_text.text("Step 5: Downloading images…")
         progress_bar.progress(65)
 
         downloaded_images: List[Tuple[str, Image.Image]] = []
@@ -180,13 +251,13 @@ def main():
         st.session_state.results["downloaded_images"] = downloaded_images
         progress_bar.progress(75)
 
-        # Step 6: Features for downloaded
-        status_text.text("Step 6: Extracting features from downloaded images...")
+        # Step 6: Features for downloaded images
+        status_text.text(f"Step 6: Extracting features from downloaded images ({method_label})…")
         image_features: List[np.ndarray] = []
         feature_progress = st.progress(0.0)
 
         for i, (_, img) in enumerate(downloaded_images):
-            feats = extract_features(img, feature_extractor)
+            feats = extract_features(img, model=feature_extractor, method=method_key)
             image_features.append(feats)
             feature_progress.progress((i + 1) / max(1, len(downloaded_images)))
 
@@ -195,7 +266,7 @@ def main():
         progress_bar.progress(85)
 
         # Step 7: Similarity
-        status_text.text("Step 7: Computing similarity scores...")
+        status_text.text("Step 7: Computing cosine similarity…")
         progress_bar.progress(90)
 
         similarities = compute_similarity(query_features, image_features)
@@ -203,7 +274,7 @@ def main():
         progress_bar.progress(95)
 
         # Step 8: Top K
-        status_text.text("Step 8: Ranking and selecting Top K images...")
+        status_text.text("Step 8: Ranking and selecting Top K images…")
         top_k_results = get_top_k_similar(similarities, min(top_k, len(similarities)))
         st.session_state.results["top_k_results"] = top_k_results
 
@@ -213,7 +284,7 @@ def main():
         status_text.empty()
         progress_bar.empty()
 
-    # Display Results
+    # ── Display Results ───────────────────────────────────────────────────────
     results = st.session_state.results
 
     if "classifications" in results:
@@ -225,10 +296,13 @@ def main():
 
         colA, colB = st.columns(2)
         with colA:
-            show_feature_heatmap(results["query_features"])
+            show_feature_heatmap(
+                results["query_features"],
+                title=f"Features – {results.get('method_label', '')}",
+            )
 
         with colB:
-            st.subheader("🏷️ Image Classification")
+            st.subheader("🏷️ Image Classification (ResNet keywords)")
             for label, prob in results["classifications"]:
                 st.write(f"**{label}**")
                 st.progress(prob)
@@ -260,7 +334,10 @@ def main():
         top_k_results = results["top_k_results"]
         downloaded_images = results.get("downloaded_images", [])
 
-        st.subheader(f"🏆 Top {len(top_k_results)} Most Similar Images")
+        st.subheader(
+            f"🏆 Top {len(top_k_results)} Most Similar Images  "
+            f"<small style='color:#888;font-size:0.8rem'>({results.get('method_label','')})</small>",
+        )
 
         if not top_k_results:
             st.warning("No similarity results to display (no images downloaded / no features).")
@@ -278,7 +355,7 @@ def main():
                     )
                     st.caption(f"Rank #{i + 1}")
 
-        # Optional detailed table; requires pandas
+        # Optional detailed table
         try:
             import pandas as pd
 
@@ -300,4 +377,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
