@@ -72,10 +72,10 @@ def show_feature_heatmap(features: np.ndarray):
 
 
 def main():
-    st.set_page_config(page_title="Image Similarity Pipeline", page_icon="🔍", layout="wide")
+    st.set_page_config(page_title="Hybrid CBIR", page_icon="🔍", layout="wide")
     inject_css()
 
-    st.markdown('<h1 class="main-header">🔍 Image Similarity Pipeline</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🔍 Hybrid CBIR</h1>', unsafe_allow_html=True)
 
     # Sidebar configuration
     st.sidebar.header("⚙️ Configuration")
@@ -300,3 +300,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
