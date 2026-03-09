@@ -1,7 +1,11 @@
 streamlit
-opencv-python-headless
 numpy
-scikit-image
-scikit-learn
+pillow
 requests
-Pillow
+scikit-learn
+google-api-python-client
+matplotlib
+pandas
+
+torch
+torchvision
